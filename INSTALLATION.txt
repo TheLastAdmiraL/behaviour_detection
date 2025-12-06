@@ -1,0 +1,33 @@
+"""Installation and Setup Guide for Windows PowerShell"""
+
+# STEP 1: Create and activate virtual environment
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# STEP 2: Upgrade pip
+python -m pip install --upgrade pip
+
+# STEP 3: Install dependencies from requirements.txt
+pip install -r requirements.txt
+
+# STEP 4: Verify installation (optional)
+python validate_project.py
+
+# STEP 5: Try Phase 1 (object detection)
+# For webcam:
+python yolo_object_detection/main.py --source 0 --show
+
+# STEP 6: Try Phase 2 (behavior detection)
+# For webcam:
+python run_behaviour.py --source 0 --show
+
+# STEP 7: Test with a video file
+# First get a test video or create a short one with your camera
+# Then:
+python run_behaviour.py --source your_video.mp4 --show --events-csv runs/events.csv --save-dir runs/output
+
+# Notes:
+# - Press 'q' to quit from any detection window
+# - First run will download the YOLOv8 model (~7 MB)
+# - On first run, YOLO will print model info and optimization messages
+# - GPU is optional but recommended for real-time performance
