@@ -13,7 +13,17 @@ from behaviour_detection.rules import RulesEngine
 class BehaviourPipeline:
     """End-to-end pipeline for behavior detection and annotation."""
     
-    def __init__(self, detector=None, tracker=None, rules_engine=None, save_events_to=None):
+    # COCO class IDs for dangerous objects
+    # knife=43, scissors=76
+    # Add more if using custom model (e.g., gun)
+    DANGEROUS_OBJECTS = {
+        43: "KNIFE",
+        76: "SCISSORS",
+        # Add custom dangerous object IDs here if using custom model
+        # Example: 80: "GUN",
+    }
+    
+    def __init__(self, detector=None, tracker=None, rules_engine=None, save_events_to=None, debug=False, violence_classifier=None):
         """
         Initialize behavior pipeline.
         
@@ -22,13 +32,19 @@ class BehaviourPipeline:
             tracker: Tracker instance (created if None)
             rules_engine: RulesEngine instance (created if None)
             save_events_to: Path to save events CSV (optional)
+            debug: Print all detected objects for debugging
+            violence_classifier: ViolenceClassifier instance for Phase 3 (optional)
         """
         self.detector = detector or YoloDetector(confidence_threshold=0.5)
         self.tracker = tracker or Tracker()
         self.rules_engine = rules_engine or RulesEngine()
         self.save_events_to = save_events_to
+        self.debug = debug
+        self.violence_classifier = violence_classifier  # Phase 3
         
         self.prev_time = time.time()
+        self.dangerous_detected = []  # Track dangerous objects
+        self.violence_result = None  # Current violence classification result
     
     def process_stream(self, source, show=True, save_dir=None):
         """
@@ -191,8 +207,49 @@ class BehaviourPipeline:
         # Detect
         detections, _ = self.detector.run_detection(frame)
         
-        # Track
+        # Debug: print all detected objects
+        if self.debug and len(detections) > 0:
+            print(f"[DEBUG] Detected {len(detections)} objects:")
+            for det in detections:
+                class_name = det[6] if len(det) > 6 else f"class_{int(det[5])}"
+                print(f"  - {class_name} (class_id={int(det[5])}, conf={det[4]:.2f})")
+        
+        # Check for dangerous objects in all detections
+        self.dangerous_detected = []
+        for det in detections:
+            x1, y1, x2, y2, conf, class_id = det[:6]
+            class_id = int(class_id)
+            if class_id in self.DANGEROUS_OBJECTS:
+                self.dangerous_detected.append({
+                    "bbox": (x1, y1, x2, y2),
+                    "conf": conf,
+                    "class_id": class_id,
+                    "name": self.DANGEROUS_OBJECTS[class_id]
+                })
+                if self.debug:
+                    print(f"  [!] DANGEROUS OBJECT DETECTED: {self.DANGEROUS_OBJECTS[class_id]}")
+        
+        # Track (only people for behavior detection)
         tracked = self.tracker.update(detections, frame)
+        
+        # Associate dangerous objects with nearby persons
+        self.armed_persons = {}  # track_id -> weapon name
+        for danger in self.dangerous_detected:
+            dx1, dy1, dx2, dy2 = danger["bbox"]
+            danger_cx = (dx1 + dx2) / 2
+            danger_cy = (dy1 + dy2) / 2
+            
+            for track in tracked:
+                px1, py1, px2, py2 = track["bbox"]
+                track_id = track["id"]
+                
+                # Check if dangerous object center is inside person bbox (with margin)
+                margin = 50  # pixels
+                if (px1 - margin <= danger_cx <= px2 + margin and 
+                    py1 - margin <= danger_cy <= py2 + margin):
+                    self.armed_persons[track_id] = danger["name"]
+                    if self.debug:
+                        print(f"  [!] Person ID {track_id} is HOLDING {danger['name']}!")
         
         # Compute time delta
         current_time = time.time()
@@ -204,6 +261,55 @@ class BehaviourPipeline:
         
         # Check behaviors
         events = self.rules_engine.step(tracked, dt)
+        
+        # Add dangerous object events (only if not held by a person)
+        for danger in self.dangerous_detected:
+            danger_event = {
+                "type": "DANGER",
+                "track_id": -1,  # No track ID for objects
+                "zone_name": danger["name"],
+                "timestamp": current_time,
+                "centroid": ((danger["bbox"][0] + danger["bbox"][2]) / 2,
+                            (danger["bbox"][1] + danger["bbox"][3]) / 2),
+            }
+            events.append(danger_event)
+            self.rules_engine.events.append(danger_event)
+        
+        # Add ARMED PERSON events (person holding dangerous object)
+        for track_id, weapon_name in self.armed_persons.items():
+            # Find the track to get centroid
+            for track in tracked:
+                if track["id"] == track_id:
+                    armed_event = {
+                        "type": "ARMED_PERSON",
+                        "track_id": track_id,
+                        "zone_name": weapon_name,
+                        "timestamp": current_time,
+                        "centroid": track["centroid"],
+                    }
+                    events.append(armed_event)
+                    self.rules_engine.events.append(armed_event)
+                    break
+        
+        # Run violence classification (Phase 3)
+        self.violence_result = None
+        if self.violence_classifier is not None:
+            self.violence_result = self.violence_classifier.predict(frame)
+            
+            # Add VIOLENCE event if detected
+            if self.violence_result['is_violent']:
+                violence_event = {
+                    "type": "VIOLENCE",
+                    "track_id": -1,
+                    "zone_name": f"{self.violence_result['violence_prob']:.1%}",
+                    "timestamp": current_time,
+                    "centroid": (frame.shape[1] / 2, frame.shape[0] / 2),
+                }
+                events.append(violence_event)
+                self.rules_engine.events.append(violence_event)
+                
+                if self.debug:
+                    print(f"  [!] VIOLENCE DETECTED: {self.violence_result['violence_prob']:.1%}")
         
         # Annotate
         annotated = self._annotate_frame(frame, tracked, events)
@@ -233,17 +339,88 @@ class BehaviourPipeline:
             x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
             cx, cy = int(cx), int(cy)
             
-            # Draw bounding box
-            color = (0, 255, 0)  # Green
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            # Check if this person is holding a dangerous object
+            is_armed = track_id in self.armed_persons
+            weapon_name = self.armed_persons.get(track_id, "")
+            
+            # Draw bounding box - RED if armed, GREEN otherwise
+            if is_armed:
+                color = (0, 0, 255)  # Red for armed person
+                thickness = 3
+            else:
+                color = (0, 255, 0)  # Green
+                thickness = 2
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
             
             # Draw centroid
             cv2.circle(annotated, (cx, cy), 3, color, -1)
             
-            # Draw track ID
+            # Draw track ID (and weapon if armed)
             font = cv2.FONT_HERSHEY_SIMPLEX
-            cv2.putText(annotated, f"ID {track_id}", (x1, y1 - 10), 
-                       font, 0.5, color, 2)
+            if is_armed:
+                label = f"ARMED: {weapon_name}"
+                # Draw warning background
+                text_size = cv2.getTextSize(label, font, 0.7, 2)[0]
+                cv2.rectangle(annotated, (x1, y1 - text_size[1] - 10), 
+                             (x1 + text_size[0] + 10, y1), (0, 0, 255), -1)
+                cv2.putText(annotated, label, (x1 + 5, y1 - 5), 
+                           font, 0.7, (255, 255, 255), 2)
+            else:
+                cv2.putText(annotated, f"ID {track_id}", (x1, y1 - 10), 
+                           font, 0.5, color, 2)
+        
+        # Draw DANGEROUS OBJECTS with red boxes and warning
+        for danger in self.dangerous_detected:
+            x1, y1, x2, y2 = danger["bbox"]
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            name = danger["name"]
+            conf = danger["conf"]
+            
+            # Bright RED color for dangerous objects
+            danger_color = (0, 0, 255)  # BGR Red
+            
+            # Draw thick red bounding box
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), danger_color, 3)
+            
+            # Draw red filled background for label
+            label = f"DANGER: {name} {conf:.0%}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.7
+            thickness = 2
+            text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
+            
+            # Label background
+            cv2.rectangle(annotated, 
+                         (x1, y1 - text_size[1] - 10), 
+                         (x1 + text_size[0] + 10, y1), 
+                         danger_color, -1)
+            
+            # Label text (white on red)
+            cv2.putText(annotated, label, (x1 + 5, y1 - 5), 
+                       font, font_scale, (255, 255, 255), thickness)
+            
+            # Draw warning corners (flashing effect visual)
+            corner_len = 20
+            cv2.line(annotated, (x1, y1), (x1 + corner_len, y1), danger_color, 4)
+            cv2.line(annotated, (x1, y1), (x1, y1 + corner_len), danger_color, 4)
+            cv2.line(annotated, (x2, y1), (x2 - corner_len, y1), danger_color, 4)
+            cv2.line(annotated, (x2, y1), (x2, y1 + corner_len), danger_color, 4)
+            cv2.line(annotated, (x1, y2), (x1 + corner_len, y2), danger_color, 4)
+            cv2.line(annotated, (x1, y2), (x1, y2 - corner_len), danger_color, 4)
+            cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), danger_color, 4)
+            cv2.line(annotated, (x2, y2), (x2, y2 - corner_len), danger_color, 4)
+        
+        # Show danger alert banner if any dangerous objects detected
+        if self.dangerous_detected:
+            banner_text = f"WARNING: {len(self.dangerous_detected)} DANGEROUS OBJECT(S) DETECTED!"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            text_size = cv2.getTextSize(banner_text, font, 0.8, 2)[0]
+            
+            # Red banner at top of frame
+            cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 40), (0, 0, 200), -1)
+            text_x = (annotated.shape[1] - text_size[0]) // 2
+            cv2.putText(annotated, banner_text, (text_x, 28), 
+                       font, 0.8, (255, 255, 255), 2)
         
         # Draw events
         for event in events:
@@ -275,13 +452,39 @@ class BehaviourPipeline:
                                font, 0.7, color, 2)
                     break
         
-        # Draw zones
-        for zone_name, zone_rect in self.rules_engine.zones.items():
-            x1, y1, x2, y2 = zone_rect
-            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (200, 200, 0), 2)
-            cv2.putText(annotated, zone_name, (x1, y1 - 5),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 0), 1)
+        # Draw violence classification result (Phase 3)
+        if self.violence_result is not None:
+            violence_prob = self.violence_result['violence_prob']
+            is_violent = self.violence_result['is_violent']
+            
+            # Violence probability bar at bottom
+            bar_x = 10
+            bar_y = annotated.shape[0] - 50
+            bar_width = 200
+            bar_height = 25
+            
+            # Background
+            cv2.rectangle(annotated, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (50, 50, 50), -1)
+            
+            # Fill based on violence probability
+            fill_width = int(violence_prob * bar_width)
+            bar_color = (0, 0, 255) if is_violent else (0, 200, 0)
+            cv2.rectangle(annotated, (bar_x, bar_y), (bar_x + fill_width, bar_y + bar_height), bar_color, -1)
+            
+            # Border
+            cv2.rectangle(annotated, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (255, 255, 255), 1)
+            
+            # Label
+            cv2.putText(annotated, f"Violence: {violence_prob:.0%}", (bar_x, bar_y - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # If violent, show big warning banner
+            if is_violent:
+                banner_y = 50 if self.dangerous_detected else 0  # Offset if danger banner exists
+                cv2.rectangle(annotated, (0, banner_y), (annotated.shape[1], banner_y + 50), (0, 0, 180), -1)
+                cv2.putText(annotated, "!!! VIOLENCE DETECTED !!!", 
+                           (annotated.shape[1]//2 - 180, banner_y + 35),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
         
         # Draw FPS
         fps = 1.0 / (self.prev_time - time.time() + 0.001)

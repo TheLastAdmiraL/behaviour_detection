@@ -43,10 +43,17 @@ def parse_arguments():
     )
     
     parser.add_argument(
+        "--model",
+        type=str,
+        default="yolov8n.pt",
+        help="YOLO model to use (default: yolov8n.pt, or path to custom trained model)"
+    )
+    
+    parser.add_argument(
         "--conf",
         type=float,
-        default=0.5,
-        help="Confidence threshold (default: 0.5)"
+        default=0.25,
+        help="Confidence threshold (default: 0.25 - lower catches more objects)"
     )
     
     parser.add_argument(
@@ -69,6 +76,26 @@ def parse_arguments():
         help="Path to save events log (CSV format)"
     )
     
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print all detected objects (helpful to see if knife is detected)"
+    )
+    
+    parser.add_argument(
+        "--violence-model",
+        type=str,
+        default=None,
+        help="Path to trained violence classification model (Phase 3)"
+    )
+    
+    parser.add_argument(
+        "--violence-threshold",
+        type=float,
+        default=0.5,
+        help="Violence detection threshold (default: 0.5)"
+    )
+    
     return parser.parse_args()
 
 
@@ -84,9 +111,24 @@ def main():
             sys.exit(1)
     
     # Initialize components
-    print("Loading YOLOv8 model...")
-    detector = YoloDetector(confidence_threshold=args.conf)
+    print(f"Loading YOLO model: {args.model}...")
+    detector = YoloDetector(model_name=args.model, confidence_threshold=args.conf)
     print("Model loaded")
+    
+    # Initialize violence classifier if provided (Phase 3)
+    violence_classifier = None
+    if args.violence_model:
+        try:
+            from behaviour_detection.violence_classifier import ViolenceClassifier
+            print(f"Loading violence classifier: {args.violence_model}...")
+            violence_classifier = ViolenceClassifier(
+                args.violence_model, 
+                threshold=args.violence_threshold
+            )
+            print("Violence classifier loaded")
+        except FileNotFoundError as e:
+            print(f"Warning: {e}")
+            print("Violence detection disabled")
     
     print("Initializing tracker...")
     tracker = Tracker(max_age=30, iou_threshold=0.3)
@@ -111,7 +153,9 @@ def main():
         detector=detector,
         tracker=tracker,
         rules_engine=rules_engine,
-        save_events_to=args.events_csv
+        save_events_to=args.events_csv,
+        debug=args.debug,
+        violence_classifier=violence_classifier  # Pass violence classifier
     )
     
     # Process stream
@@ -136,10 +180,27 @@ def main():
             run_count = sum(1 for e in events if e["type"] == "RUN")
             fall_count = sum(1 for e in events if e["type"] == "FALL")
             loiter_count = sum(1 for e in events if e["type"] == "LOITER")
+            danger_count = sum(1 for e in events if e["type"] == "DANGER")
+            armed_count = sum(1 for e in events if e["type"] == "ARMED_PERSON")
+            violence_count = sum(1 for e in events if e["type"] == "VIOLENCE")
             
             print(f"  - Running: {run_count}")
             print(f"  - Falls: {fall_count}")
             print(f"  - Loitering: {loiter_count}")
+            print(f"  - Dangerous Objects: {danger_count}")
+            print(f"  - Armed Persons: {armed_count}")
+            print(f"  - Violence Events: {violence_count}")
+            
+            if violence_count > 0:
+                print("\n  🚨 CRITICAL: Violence was detected!")
+            if armed_count > 0:
+                print("\n  🚨 CRITICAL: Armed persons were detected!")
+                armed_weapons = set(e.get("zone_name", "unknown") for e in events if e["type"] == "ARMED_PERSON")
+                print(f"      Weapons: {', '.join(armed_weapons)}")
+            elif danger_count > 0:
+                print("\n  ⚠️  WARNING: Dangerous objects were detected!")
+                danger_types = set(e.get("zone_name", "unknown") for e in events if e["type"] == "DANGER")
+                print(f"      Types: {', '.join(danger_types)}")
         else:
             print("\nNo behavior events detected")
         
