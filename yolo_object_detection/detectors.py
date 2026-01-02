@@ -18,20 +18,25 @@ class YoloDetector:
         self.confidence_threshold = confidence_threshold
         self.model = YOLO(model_name)
     
-    def run_detection(self, frame):
+    def run_detection(self, frame, dangerous_objects_conf=0.05):
         """
         Run detection on a single frame.
         
         Args:
             frame: Input frame (BGR image from OpenCV)
+            dangerous_objects_conf: Lower confidence threshold for dangerous objects (default: 0.15)
         
         Returns:
             tuple: (detections, annotated_frame)
                 detections: list of [x1, y1, x2, y2, conf, class_id, class_name]
                 annotated_frame: frame with drawn detections
         """
-        # Run inference
-        results = self.model(frame, conf=self.confidence_threshold, verbose=False)
+        # Run inference with lower confidence to catch dangerous objects
+        min_conf = min(self.confidence_threshold, dangerous_objects_conf)
+        results = self.model(frame, conf=min_conf, verbose=False)
+        
+        # Dangerous object class IDs (knife and scissors)
+        DANGEROUS_CLASSES = {43, 76}  # KNIFE=43, SCISSORS=76
         
         # Extract detections
         detections = []
@@ -45,7 +50,15 @@ class YoloDetector:
                     class_id = int(box.cls[0].cpu().numpy())
                     class_name = self.model.names[class_id]
                     
-                    detections.append([x1, y1, x2, y2, conf, class_id, class_name])
+                    # Apply different confidence thresholds
+                    if class_id in DANGEROUS_CLASSES:
+                        # Lower threshold for dangerous objects
+                        if conf >= dangerous_objects_conf:
+                            detections.append([x1, y1, x2, y2, conf, class_id, class_name])
+                    else:
+                        # Normal threshold for other objects
+                        if conf >= self.confidence_threshold:
+                            detections.append([x1, y1, x2, y2, conf, class_id, class_name])
         
         # Get annotated frame from YOLO
         annotated_frame = results[0].plot() if results else frame
