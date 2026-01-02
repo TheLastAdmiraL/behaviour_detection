@@ -206,9 +206,14 @@ This runs all three phases together:
 - Behavior detection (running, loitering, falls)
 - Violence classification (real-time probability)
 
+**Note:** The system only displays threats - dangerous objects (knives, scissors) and armed persons. Normal people and other objects are hidden for cleaner visualization.
+
 #### Violence Detection Visual Output
 - **Violence probability bar** at bottom of screen
 - **Red "VIOLENCE DETECTED" banner** when probability > 50%
+- **Dangerous objects** shown with red boxes labeled "DANGER: KNIFE"
+- **Armed persons** shown with red boxes labeled "ARMED: KNIFE"
+- **Normal detections** (people, objects) are hidden
 - **Events logged** to CSV with timestamps
 
 ### Example Workflows

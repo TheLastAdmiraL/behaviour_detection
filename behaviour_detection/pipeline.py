@@ -330,7 +330,7 @@ class BehaviourPipeline:
         """
         annotated = frame.copy()
         
-        # Draw tracks
+        # Draw tracks - ONLY FOR ARMED PERSONS (skip normal people)
         for track in tracked:
             track_id = track["id"]
             x1, y1, x2, y2 = track["bbox"]
@@ -343,21 +343,19 @@ class BehaviourPipeline:
             is_armed = track_id in self.armed_persons
             weapon_name = self.armed_persons.get(track_id, "")
             
-            # Draw bounding box - RED if armed, GREEN otherwise
+            # ONLY draw if armed - skip normal people
             if is_armed:
                 color = (0, 0, 255)  # Red for armed person
                 thickness = 3
-            else:
-                color = (0, 255, 0)  # Green
-                thickness = 2
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
-            
-            # Draw centroid
-            cv2.circle(annotated, (cx, cy), 3, color, -1)
-            
-            # Draw track ID (and weapon if armed)
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            if is_armed:
+                
+                # Draw bounding box
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
+                
+                # Draw centroid
+                cv2.circle(annotated, (cx, cy), 3, color, -1)
+                
+                # Draw track ID and weapon
+                font = cv2.FONT_HERSHEY_SIMPLEX
                 label = f"ARMED: {weapon_name}"
                 # Draw warning background
                 text_size = cv2.getTextSize(label, font, 0.7, 2)[0]
@@ -365,9 +363,6 @@ class BehaviourPipeline:
                              (x1 + text_size[0] + 10, y1), (0, 0, 255), -1)
                 cv2.putText(annotated, label, (x1 + 5, y1 - 5), 
                            font, 0.7, (255, 255, 255), 2)
-            else:
-                cv2.putText(annotated, f"ID {track_id}", (x1, y1 - 10), 
-                           font, 0.5, color, 2)
         
         # Draw DANGEROUS OBJECTS with red boxes and warning
         for danger in self.dangerous_detected:
@@ -422,10 +417,14 @@ class BehaviourPipeline:
             cv2.putText(annotated, banner_text, (text_x, 28), 
                        font, 0.8, (255, 255, 255), 2)
         
-        # Draw events
+        # Draw events (excluding RUNNING - logged only, not displayed)
         for event in events:
             track_id = event["track_id"]
             event_type = event["type"]
+            
+            # Skip RUNNING events - logged but not displayed
+            if event_type == "RUN":
+                continue
             
             # Find track to get position
             for track in tracked:
@@ -434,10 +433,7 @@ class BehaviourPipeline:
                     y_offset = int(y1 - 30)
                     
                     # Color based on event type
-                    if event_type == "RUN":
-                        color = (0, 0, 255)  # Red
-                        label = "RUNNING"
-                    elif event_type == "FALL":
+                    if event_type == "FALL":
                         color = (0, 165, 255)  # Orange
                         label = "FALL"
                     elif event_type == "LOITER":
