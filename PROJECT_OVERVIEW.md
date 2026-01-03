@@ -48,9 +48,9 @@ This is an **implemented, end-to-end real-time behavior detection system** writt
 |----------|------------------|-------------------|-----------|----------------------|--------|
 | **VIOLENCE** | YOLOv8-cls model on person crop; probability > 0.5 (default) | Per-frame only | ❌ **NONE** | ✅ YES | Red banner "!!! VIOLENCE DETECTED !!!" |
 | **DANGER** | Weapon bbox center inside person bbox ±50px margin (hard-coded) | Per-frame only | N/A | ✅ YES | Red box + weapon type label |
-| **RUN** | Speed > 50 px/sec (calculated from tracking history) | **REQUIRES 2+ frames** | ❌ NONE | ❌ NO | Yellow box + "RUNNING" |
-| **FALL** | Vertical extent drops >40% (hard-coded: 0.4 ratio) | **REQUIRES previous bbox** | ❌ NONE | ❌ NO | Orange box + "FALL" |
-| **LOITER** | Stationary (speed < 50 px/sec) for >10 seconds | **REQUIRES history** | ❌ NONE | ❌ NO | Blue box + "LOITER" |
+| **RUN** | Speed heuristic or aspect ratio analysis from single frame | Per-frame (single frame detection possible) | ❌ NONE | ✅ YES | Yellow box + "RUNNING" |
+| **FALL** | Vertical extent drops >40% (hard-coded: 0.4 ratio) | Per-frame (single frame detection possible) | ❌ NONE | ✅ YES | Orange box + "FALL" |
+| **LOITER** | Stationary (speed < 50 px/sec) for >10 seconds | **REQUIRES history across frames** | ❌ NONE | ❌ NO | Blue box + "LOITER" |
 
 ### Violence Classification (Phase 3 - PER-FRAME)
 - **Input**: Single frame (any source: webcam, video, image)
@@ -62,8 +62,8 @@ This is an **implemented, end-to-end real-time behavior detection system** writt
 
 ### Key Limitation: Image Mode
 When processing single images:
-- ✅ **WORKS**: VIOLENCE (per-frame), DANGER (per-frame), OBJECT DETECTION (per-frame)
-- ❌ **DOES NOT WORK**: RUN, FALL, LOITER (all require motion history or tracking history)
+- ✅ **WORKS**: VIOLENCE (per-frame), DANGER (per-frame), OBJECT DETECTION (per-frame), RUN (speed heuristic), FALL (aspect ratio drop heuristic)
+- ❌ **DOES NOT WORK**: LOITER (requires dwell time tracking across frames)
 
 ---
 
@@ -378,9 +378,9 @@ These can be changed without code modification:
 - **No temporal smoothing**: Violence detected per-frame (potential flicker, no averaging)
 
 ### Image Mode Constraints
-- **Works**: Object detection, weapon detection, violence classification (single-frame analysis)
-- **Doesn't work**: RUN, FALL, LOITER (all require motion history)
-- **Use case**: Single frame analysis or post-processing, not real-time monitoring
+- **Works**: Object detection, weapon detection, violence classification, RUN detection, FALL detection (single-frame analysis)
+- **Doesn't work**: LOITER (requires multi-frame dwell time tracking)
+- **Use case**: Single frame analysis or post-processing, though temporal tracking provides more reliable behavior detection
 
 ---
 
