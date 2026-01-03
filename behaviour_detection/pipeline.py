@@ -13,14 +13,19 @@ from behaviour_detection.rules import RulesEngine
 class BehaviourPipeline:
     """End-to-end pipeline for behavior detection and annotation."""
     
-    # COCO class IDs for dangerous objects
+    # COCO class IDs for dangerous objects (for default yolov8n.pt model)
     # knife=43, scissors=76
-    # Add more if using custom model (e.g., gun)
-    DANGEROUS_OBJECTS = {
+    COCO_DANGEROUS_OBJECTS = {
         43: "KNIFE",
         76: "SCISSORS",
-        # Add custom dangerous object IDs here if using custom model
-        # Example: 80: "GUN",
+    }
+    
+    # Custom weapon detection model class IDs
+    # Based on weapon_detection_clean dataset: pistol=0, knife=1, rifle=2, person=3
+    WEAPON_MODEL_DANGEROUS_OBJECTS = {
+        0: "PISTOL",
+        1: "KNIFE",
+        2: "RIFLE",
     }
     
     def __init__(self, detector=None, tracker=None, rules_engine=None, save_events_to=None, debug=False, violence_classifier=None):
@@ -42,9 +47,55 @@ class BehaviourPipeline:
         self.debug = debug
         self.violence_classifier = violence_classifier  # Phase 3
         
+        # Auto-detect which model is being used and set appropriate dangerous object classes
+        model_name = self.detector.model_name.lower()
+        if "weapon" in model_name:
+            self.DANGEROUS_OBJECTS = self.WEAPON_MODEL_DANGEROUS_OBJECTS
+            if self.debug:
+                print(f"[INFO] Using weapon detection model - dangerous classes: {self.DANGEROUS_OBJECTS}")
+        else:
+            self.DANGEROUS_OBJECTS = self.COCO_DANGEROUS_OBJECTS
+            if self.debug:
+                print(f"[INFO] Using COCO model - dangerous classes: {self.DANGEROUS_OBJECTS}")
+        
         self.prev_time = time.time()
         self.dangerous_detected = []  # Track dangerous objects
         self.violence_result = None  # Current violence classification result
+        
+        # Event cooldown tracking (4 seconds)
+        self.EVENT_COOLDOWN = 4.0  # seconds
+        self.last_event_time = {}  # track_id or event_type -> timestamp
+        self.last_violence_time = 0  # Last time violence was detected
+        
+        # State change tracking for screenshots
+        self.previous_event_types = set()  # Event types from last frame
+        self.last_screenshot_time = 0  # When we last took a screenshot
+        self.SCREENSHOT_MIN_INTERVAL = 10.0  # Minimum 10 seconds between same-state screenshots
+    
+    def should_take_screenshot(self, current_event_types):
+        """
+        Determine if a screenshot should be taken based on state changes.
+        
+        Args:
+            current_event_types: Set of event types in current frame
+        
+        Returns:
+            bool: True if screenshot should be taken
+        """
+        current_time = time.time()
+        
+        # State changed - always take screenshot
+        if current_event_types != self.previous_event_types:
+            self.previous_event_types = current_event_types.copy()
+            self.last_screenshot_time = current_time
+            return True
+        
+        # State is the same - take screenshot every 10 seconds
+        if current_event_types and (current_time - self.last_screenshot_time) >= self.SCREENSHOT_MIN_INTERVAL:
+            self.last_screenshot_time = current_time
+            return True
+        
+        return False
     
     def process_stream(self, source, show=True, save_dir=None):
         """
@@ -78,7 +129,7 @@ class BehaviourPipeline:
             return
         
         # Run pipeline
-        detections, tracked, events, annotated = self._run_pipeline_step(frame)
+        detections, tracked, events, annotated, drawn_events = self._run_pipeline_step(frame)
         
         # Display if requested
         if show:
@@ -112,6 +163,12 @@ class BehaviourPipeline:
             save_path = Path(save_dir)
             save_path.mkdir(parents=True, exist_ok=True)
         
+        # Create event screenshots folder based on video name
+        video_name = Path(video_path).stem
+        event_screenshots_dir = Path("test_videos") / video_name / "images"
+        event_screenshots_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Event screenshots will be saved to: {event_screenshots_dir}")
+        
         frame_idx = 0
         with tqdm(total=total_frames, desc="Processing") as pbar:
             while True:
@@ -119,7 +176,27 @@ class BehaviourPipeline:
                 if not ret:
                     break
                 
-                detections, tracked, events, annotated = self._run_pipeline_step(frame)
+                # Calculate video timestamp
+                video_timestamp = frame_idx / fps if fps > 0 else frame_idx
+                
+                detections, tracked, events, annotated, drawn_events = self._run_pipeline_step(frame)
+                
+                # Check if we should take a screenshot based on state change
+                if drawn_events:
+                    current_event_types = set(e["type"] for e in drawn_events)
+                    if self.should_take_screenshot(current_event_types):
+                        timestamp_str = f"{video_timestamp:.2f}s"
+                        screenshot_filename = f"event_{frame_idx:06d}_{timestamp_str.replace('.', '_')}.jpg"
+                        screenshot_path = event_screenshots_dir / screenshot_filename
+                        cv2.imwrite(str(screenshot_path), annotated)
+                        
+                        # Log what events were captured
+                        event_types = ", ".join(current_event_types)
+                        if self.debug:
+                            print(f"  [SCREENSHOT] Saved: {screenshot_filename} ({event_types})")
+                else:
+                    # No events - reset state tracking
+                    self.previous_event_types = set()
                 
                 # Save frame
                 if save_path:
@@ -141,6 +218,7 @@ class BehaviourPipeline:
         cv2.destroyAllWindows()
         
         print(f"Processed {frame_idx} frames")
+        print(f"Event screenshots saved to: {event_screenshots_dir}")
         
         # Save events
         if self.save_events_to:
@@ -161,7 +239,13 @@ class BehaviourPipeline:
             save_path = Path(save_dir)
             save_path.mkdir(parents=True, exist_ok=True)
         
+        # Create event screenshots folder for webcam
+        event_screenshots_dir = Path("test_videos") / "webcam" / "images"
+        event_screenshots_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Event screenshots will be saved to: {event_screenshots_dir}")
+        
         frame_idx = 0
+        start_time = time.time()
         try:
             while True:
                 ret, frame = cap.read()
@@ -169,7 +253,27 @@ class BehaviourPipeline:
                     print("Error: Could not read from webcam")
                     break
                 
-                detections, tracked, events, annotated = self._run_pipeline_step(frame)
+                detections, tracked, events, annotated, drawn_events = self._run_pipeline_step(frame)
+                
+                # Calculate webcam timestamp
+                webcam_timestamp = frame_idx * (1 / 30)  # Assume ~30 FPS
+                
+                # Check if we should take a screenshot based on state change
+                if drawn_events:
+                    current_event_types = set(e["type"] for e in drawn_events)
+                    if self.should_take_screenshot(current_event_types):
+                        timestamp_str = f"{webcam_timestamp:.2f}s"
+                        screenshot_filename = f"event_{frame_idx:06d}_{timestamp_str.replace('.', '_')}.jpg"
+                        screenshot_path = event_screenshots_dir / screenshot_filename
+                        cv2.imwrite(str(screenshot_path), annotated)
+                        
+                        # Log what events were captured
+                        event_types = ", ".join(current_event_types)
+                        if self.debug:
+                            print(f"  [SCREENSHOT] Saved: {screenshot_filename} ({event_types})")
+                else:
+                    # No events - reset state tracking
+                    self.previous_event_types = set()
                 
                 # Save frame
                 if save_path:
@@ -191,6 +295,7 @@ class BehaviourPipeline:
             cv2.destroyAllWindows()
         
         print(f"Captured {frame_idx} frames")
+        print(f"Event screenshots saved to: {event_screenshots_dir}")
         
         # Save events
         if self.save_events_to:
@@ -309,12 +414,16 @@ class BehaviourPipeline:
                 self.rules_engine.events.append(violence_event)
                 
                 if self.debug:
-                    print(f"  [!] VIOLENCE DETECTED: {self.violence_result['violence_prob']:.1%}")
+                    has_threats = len(self.dangerous_detected) > 0 or len(self.armed_persons) > 0
+                    if has_threats:
+                        print(f"  [!] VIOLENCE DETECTED: {self.violence_result['violence_prob']:.1%} (with visible threats)")
+                    else:
+                        print(f"  [!] VIOLENCE DETECTED: {self.violence_result['violence_prob']:.1%} (no weapons visible)")
         
         # Annotate
-        annotated = self._annotate_frame(frame, tracked, events)
+        annotated, drawn_events = self._annotate_frame(frame, tracked, events)
         
-        return detections, tracked, events, annotated
+        return detections, tracked, events, annotated, drawn_events
     
     def _annotate_frame(self, frame, tracked, events):
         """
@@ -326,9 +435,14 @@ class BehaviourPipeline:
             events: List of events detected
         
         Returns:
-            Annotated frame
+            Tuple: (Annotated frame, List of events that were actually drawn)
         """
         annotated = frame.copy()
+        drawn_events = []  # Track which events were actually drawn
+        
+        # Debug: Print what we're about to draw
+        if self.debug:
+            print(f"[ANNOTATE] Drawing {len(self.dangerous_detected)} dangerous objects, {len(self.armed_persons)} armed persons")
         
         # Draw tracks - ONLY FOR ARMED PERSONS (skip normal people)
         for track in tracked:
@@ -363,6 +477,10 @@ class BehaviourPipeline:
                              (x1 + text_size[0] + 10, y1), (0, 0, 255), -1)
                 cv2.putText(annotated, label, (x1 + 5, y1 - 5), 
                            font, 0.7, (255, 255, 255), 2)
+                # Track that we drew an armed person
+                for event in events:
+                    if event["type"] == "ARMED_PERSON" and event["track_id"] == track_id:
+                        drawn_events.append(event)
         
         # Draw DANGEROUS OBJECTS with red boxes and warning
         for danger in self.dangerous_detected:
@@ -417,41 +535,95 @@ class BehaviourPipeline:
             cv2.putText(annotated, banner_text, (text_x, 28), 
                        font, 0.8, (255, 255, 255), 2)
         
-        # Draw events (excluding RUNNING - logged only, not displayed)
+        # Check if violence is detected
+        violence_detected = any(e["type"] == "VIOLENCE" for e in events)
+        
+        # Update last violence time if violence was detected
+        if violence_detected:
+            self.last_violence_time = time.time()
+        
+        # Check if we're still in violence cooldown period
+        current_time = time.time()
+        in_violence_cooldown = (current_time - self.last_violence_time) < self.EVENT_COOLDOWN
+        
+        # Draw events (RUN, FALL, LOITER) with bounding boxes
         for event in events:
             track_id = event["track_id"]
             event_type = event["type"]
             
-            # Skip RUNNING events - logged but not displayed
-            if event_type == "RUN":
+            # Skip weapon/violence events (already drawn above)
+            if event_type in ["DANGER", "ARMED_PERSON", "VIOLENCE"]:
                 continue
             
-            # Find track to get position
+            # Skip running events if violence is detected or in violence cooldown (prioritize violence annotation)
+            if event_type == "RUN" and in_violence_cooldown:
+                continue
+            
+            # Check cooldown for this specific event
+            event_key = f"{track_id}_{event_type}"
+            if event_key in self.last_event_time:
+                time_since_event = current_time - self.last_event_time[event_key]
+                if time_since_event < self.EVENT_COOLDOWN:
+                    # Still in cooldown, skip drawing but keep the cooldown active
+                    continue
+            
+            # Update cooldown for this event
+            self.last_event_time[event_key] = current_time
+            
+            # Find track to get position and draw box
             for track in tracked:
                 if track["id"] == track_id:
                     x1, y1, x2, y2 = track["bbox"]
-                    y_offset = int(y1 - 30)
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
                     
-                    # Color based on event type
-                    if event_type == "FALL":
+                    # Color and label based on event type
+                    if event_type == "RUN":
+                        color = (0, 255, 255)  # Yellow
+                        label = "RUNNING"
+                        thickness = 3
+                    elif event_type == "FALL":
                         color = (0, 165, 255)  # Orange
                         label = "FALL"
+                        thickness = 3
                     elif event_type == "LOITER":
                         color = (255, 0, 0)  # Blue
                         label = f"LOITER ({event.get('zone_name', 'zone')})"
+                        thickness = 2
                     else:
-                        color = (255, 255, 255)
+                        color = (255, 255, 255)  # White
                         label = event_type
+                        thickness = 2
                     
+                    # Draw bounding box
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
+                    
+                    # Draw label with background
                     font = cv2.FONT_HERSHEY_SIMPLEX
-                    cv2.putText(annotated, label, (int(x1), int(max(20, y_offset))), 
-                               font, 0.7, color, 2)
+                    text_size = cv2.getTextSize(label, font, 0.7, 2)[0]
+                    label_y = max(20, y1 - 10)
+                    
+                    # Label background
+                    cv2.rectangle(annotated, 
+                                 (x1, label_y - text_size[1] - 5), 
+                                 (x1 + text_size[0] + 10, label_y + 5), 
+                                 color, -1)
+                    
+                    # Label text
+                    cv2.putText(annotated, label, (x1 + 5, label_y), 
+                               font, 0.7, (255, 255, 255), 2)
+                    # Track that we drew this event (only RUN events make it through the filtering)
+                    if event_type == "RUN":
+                        drawn_events.append(event)
                     break
         
         # Draw violence classification result (Phase 3)
-        if self.violence_result is not None:
+        # Always show if violence classifier is enabled
+        if self.violence_classifier is not None and self.violence_result is not None:
             violence_prob = self.violence_result['violence_prob']
             is_violent = self.violence_result['is_violent']
+            
+            if self.debug:
+                print(f"[VIOLENCE] Prob: {violence_prob:.1%}, Is_violent: {is_violent}")
             
             # Violence probability bar at bottom
             bar_x = 10
@@ -474,13 +646,49 @@ class BehaviourPipeline:
             cv2.putText(annotated, f"Violence: {violence_prob:.0%}", (bar_x, bar_y - 5),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
-            # If violent, show big warning banner
+            # If violent, show big warning banner and draw boxes around all people
             if is_violent:
                 banner_y = 50 if self.dangerous_detected else 0  # Offset if danger banner exists
                 cv2.rectangle(annotated, (0, banner_y), (annotated.shape[1], banner_y + 50), (0, 0, 180), -1)
                 cv2.putText(annotated, "!!! VIOLENCE DETECTED !!!", 
                            (annotated.shape[1]//2 - 180, banner_y + 35),
                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                
+                # Track that we drew violence
+                for event in events:
+                    if event["type"] == "VIOLENCE":
+                        drawn_events.append(event)
+                        break
+                
+                # Draw red boxes around all tracked people (potential perpetrators)
+                for track in tracked:
+                    x1, y1, x2, y2 = track["bbox"]
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    
+                    # Skip if this person is already drawn (armed person)
+                    if track["id"] in self.armed_persons:
+                        continue
+                    
+                    # Red box for person involved in violence
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                    
+                    # Label
+                    label = f"VIOLENCE"
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    text_size = cv2.getTextSize(label, font, 0.7, 2)[0]
+                    label_y = max(20, y1 - 10)
+                    
+                    # Red background for label
+                    cv2.rectangle(annotated, 
+                                 (x1, label_y - text_size[1] - 5), 
+                                 (x1 + text_size[0] + 10, label_y + 5), 
+                                 (0, 0, 255), -1)
+                    
+                    # White text
+                    cv2.putText(annotated, label, (x1 + 5, label_y), 
+                               font, 0.7, (255, 255, 255), 2)
+        elif self.debug and self.violence_classifier is not None:
+            print(f"[VIOLENCE] violence_result is None")
         
         # Draw FPS
         fps = 1.0 / (self.prev_time - time.time() + 0.001)
@@ -489,4 +697,4 @@ class BehaviourPipeline:
                        (annotated.shape[1] - 150, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        return annotated
+        return annotated, drawn_events

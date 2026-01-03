@@ -139,7 +139,7 @@ def main():
     zones = {"center": (100, 100, 300, 300)}
     
     cfg = {
-        "RUN_SPEED_THRESHOLD": 150.0,
+        "RUN_SPEED_THRESHOLD": 50.0,  # Very sensitive - catches fast walking and running
         "LOITER_TIME_THRESHOLD": 10.0,
         "LOITER_SPEED_THRESHOLD": 50.0,
         "FALL_VERTICAL_RATIO_DROP": 0.4,
