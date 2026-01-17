@@ -4,7 +4,7 @@
 
 ---
 
-## 🚀 Getting Started
+##  Getting Started
 
 ### Installation & First Run
 
@@ -1069,7 +1069,7 @@ Phase 1 (Detection) → Phase 2 (Tracking) → Phase 3 (Behavior + Violence) →
 python run_behaviour.py --source 0 --show --violence-model runs/violence_cls/train/weights/best.pt
 
 # Video analysis with event logging
-python run_behaviour.py --source test_videos/video_test_4.mp4 --violence-model runs/violence_cls/train/weights/best.pt --events-csv events.csv --show
+python run_behaviour.py --source 0 --show --violence-model runs/violence_cls/train/weights/best.pt --violence-threshold 0.85
 
 # Headless mode (no display, just logging)
 python run_behaviour.py --source 0 --violence-model runs/violence_cls/train/weights/best.pt --events-csv events.csv

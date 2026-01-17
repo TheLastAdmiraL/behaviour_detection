@@ -399,7 +399,9 @@ class BehaviourPipeline:
         # Run violence classification (Phase 3)
         self.violence_result = None
         if self.violence_classifier is not None:
-            self.violence_result = self.violence_classifier.predict(frame)
+            # Count people in frame to adjust sensitivity
+            num_people = len(tracked)
+            self.violence_result = self.violence_classifier.predict(frame, num_people=num_people)
             
             # Add VIOLENCE event if detected
             if self.violence_result['is_violent']:

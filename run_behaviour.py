@@ -92,8 +92,8 @@ def parse_arguments():
     parser.add_argument(
         "--violence-threshold",
         type=float,
-        default=0.5,
-        help="Violence detection threshold (default: 0.5)"
+        default=0.7,
+        help="Violence detection threshold (default: 0.7 - higher = less sensitive, fewer detections)"
     )
     
     return parser.parse_args()

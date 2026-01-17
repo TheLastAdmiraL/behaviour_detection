@@ -22,15 +22,17 @@ class ViolenceClassifier:
         print(f"Is violent: {result['is_violent']}")
     """
     
-    def __init__(self, model_path, threshold=0.5):
+    def __init__(self, model_path, threshold=0.7):
         """
         Initialize the violence classifier.
         
         Args:
             model_path: Path to trained classification model weights
-            threshold: Probability threshold for violence detection (default: 0.5)
+            threshold: Base probability threshold for violence detection (default: 0.7 - less sensitive, fewer false positives)
+                      Will be adjusted higher when many people are detected
         """
         self.model_path = Path(model_path)
+        self.base_threshold = threshold
         self.threshold = threshold
         
         if not self.model_path.exists():
@@ -57,12 +59,13 @@ class ViolenceClassifier:
         
         print(f"Violence class index: {self.violence_idx}")
     
-    def predict(self, frame):
+    def predict(self, frame, num_people=None):
         """
         Predict violence probability for a frame.
         
         Args:
             frame: Input frame (BGR image from OpenCV)
+            num_people: Number of people detected in frame (optional, used to adjust sensitivity)
         
         Returns:
             dict: {
@@ -70,9 +73,25 @@ class ViolenceClassifier:
                 'nonviolence_prob': float (0-1),
                 'is_violent': bool,
                 'confidence': float,
-                'class_name': str
+                'class_name': str,
+                'threshold_used': float
             }
         """
+        # Adjust threshold based on crowd density
+        # More people = higher threshold needed = fewer false positives
+        self.threshold = self.base_threshold
+        if num_people is not None:
+            if num_people >= 5:
+                # Large crowd: increase threshold by 0.15 (0.7 -> 0.85)
+                self.threshold = self.base_threshold + 0.15
+            elif num_people >= 3:
+                # Medium crowd: increase threshold by 0.10 (0.7 -> 0.80)
+                self.threshold = self.base_threshold + 0.10
+            elif num_people >= 2:
+                # 2 people: increase threshold by 0.05 (0.7 -> 0.75)
+                self.threshold = self.base_threshold + 0.05
+            # 1 person or 0: use base threshold
+        
         # Run inference
         results = self.model.predict(frame, verbose=False)
         
@@ -93,7 +112,8 @@ class ViolenceClassifier:
             'nonviolence_prob': nonviolence_prob,
             'is_violent': violence_prob >= self.threshold,
             'confidence': top1_conf,
-            'class_name': class_name
+            'class_name': class_name,
+            'threshold_used': self.threshold
         }
     
     def get_violence_score(self, frame):
@@ -139,7 +159,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True, help="Path to violence model")
     parser.add_argument("--source", type=str, default="0", help="Video source")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Violence threshold")
+    parser.add_argument("--threshold", type=float, default=0.7, help="Violence threshold (higher = less sensitive, fewer detections)")
     args = parser.parse_args()
     
     # Initialize classifier
